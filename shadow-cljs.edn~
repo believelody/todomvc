@@ -3,8 +3,7 @@
   "src/test"]
 
  :dependencies
- [[reagent "0.10.0"]
-  [clj-commons/secretary "1.2.4"]]
+ [[reagent "0.10.0"]]
 
  :dev-http
  {3000 "public"}

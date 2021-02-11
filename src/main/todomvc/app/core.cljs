@@ -1,8 +1,13 @@
 (ns todomvc.app.core
   (:require [reagent.dom :as rdom]
             [reagent.core :as r]
-            [cljs.pprint :refer [pprint]]
-            [clojure.string :as str]))
+            ;; [cljs.pprint :refer [pprint]]
+            [clojure.string :as str]
+            [cljs.reader :as reader]
+            [secretary.core :as secretary :refer-macros [defroute]]
+            [goog.events :as gevents]
+            [goog.history.EventType :as EventType])
+  (:import goog.history.Html5History))
 
 ;; --- App State ---
 
@@ -12,21 +17,49 @@
 
 ;; (def initial-todos-sorted (into (sorted-map) initial-todos))
 
-(defonce todos (r/atom (sorted-map)))
+(defonce db (r/atom {:todos (sorted-map)
+                     :showing :all}))
 
-(defonce counter (r/atom 0))
+(defonce todos (r/cursor db [:todos]))
+
+(defonce showing (r/cursor db [:showing]))
+
+;; (defonce counter (r/atom 0))
+
+;; --- Local Storage ---
+
+(def local-store-key "todo-app")
+
+(defn todos->local-store []
+  (.setItem js/localStorage local-store-key (str @todos)))
+  ;; (.setItem js/localStorage local-store-key (str todos)))
+
+(defn local-store->todos []
+  (let [edn-map-todos (.getItem js/localStorage local-store-key)
+        unsorted-todos (some->> edn-map-todos reader/read-string)
+        sorted-todos (into (sorted-map) unsorted-todos)]
+    (reset! todos sorted-todos)))
+    ;; (reset! todos sorted-todos)))
 
 ;; --- Watch the State ---
 
-(add-watch todos :todos
-           (fn [key _atom _old-state new-state]
-             (println "---" key "atom changed ---")
-             (pprint new-state)))
+(add-watch db :db
+           (fn [_key _atom old-state new-state]
+             (when (not= (:todos new-state) (:todos old-state))
+               (todos->local-store))
+             #_(println "---" key "atom changed ---")
+             #_(pprint new-state)))
 
 ;; --- Utilities ---
 
+(defn allocate-next-id [todos]
+  ((fnil inc 0) (last (keys todos))))
+
+(defn set-showing [kw]
+  (reset! showing kw))
+
 (defn add-todo [text]
-  (let [id (swap! counter inc)
+  (let [id (allocate-next-id @todos)
         new-todo {:id id, :title text, :done false}]
     (swap! todos assoc id new-todo)))
 
@@ -52,9 +85,25 @@
   (let [g #(get-in % [1 :done])]
     (swap! todos mmap remove g)))
 
+;; --- Hash-based Routing ---
+
+(defn hook-browser-navigation! []
+  (doto (Html5History.)
+    (gevents/listen
+     EventType/NAVIGATE
+     (fn [event]
+       (secretary/dispatch! (.. ^js event -token))))
+    (.setEnabled true)))
+
+(defn app-routes []
+  (secretary/set-config! :prefix "#")
+  (defroute "/" [] (set-showing :all))
+  (defroute "/:filter" [filter] (set-showing (keyword filter)))
+  (hook-browser-navigation!))
+
 ;; --- Init App with Sample Data ---
 
-(defonce init (do
+#_(defonce init (do
                 (add-todo "Do laundry")
                 (add-todo "Wash dishes")
                 (add-todo "Buy groceries")))
@@ -103,7 +152,7 @@
                       :on-save (fn [text] (save-todo id text))
                       :on-stop #(reset! editing false)}])])))
 
-(defn task-list [showing]
+(defn task-list []
   (let [items (vals @todos)
         filter-fn (case @showing
                     :done :done
@@ -122,19 +171,19 @@
       (for [todo visible-items]
         ^{:key (:id todo)}[todo-item todo])]]))
 
-(defn footer-controls [showing]
+(defn footer-controls []
   (let [items (vals @todos)
         done-count (count (filter :done items))
         active-count (- (count items) done-count)
         props-for (fn [kw]
                     {:class (when (= kw @showing) "selected")
                      :on-click #(reset! showing kw)
-                     :href "#"})]
+                     :href (str "#/" (name kw))})]
     [:footer.footer
      [:span.todo-count
       [:strong active-count] " " (case active-count
-                               1 "item"
-                               "items") " left"]
+                                   1 "item"
+                                   "items") " left"]
      [:ul.filters
       [:li [:a (props-for :all) "All"]]
       [:li [:a (props-for :active) "Active"]]
@@ -150,17 +199,16 @@
                  :on-save add-todo}]]])
 
 (defn todo-app []
-  (let [showing (r/atom :all)]
-    (fn []
-      [:div
-       [:section.todoapp
-        [task-entry]
-        (when (seq @todos)
-          [:div
-           [task-list showing]
-           [footer-controls showing]])]
-       [:footer.info
-        [:p "Double-click to edit a todo"]]])))
+  (fn []
+    [:div
+     [:section.todoapp
+      [task-entry]
+      (when (seq @todos)
+        [:div
+         [task-list]
+         [footer-controls]])]
+     [:footer.info
+      [:p "Double-click to edit a todo"]]]))
 
 ;; --- Render ---
 
@@ -168,6 +216,8 @@
   (rdom/render [todo-app] (.getElementById js/document "root")))
 
 (defn ^:export main []
+  (local-store->todos)
+  (app-routes)
   (render))
 
 (defn ^:dev/after-load reload! []
